@@ -317,26 +317,30 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
         ),
       );
 
-    // ---- Step 2: Parse medicines from OCR text only ----
-    let parsed = raw.length >= 3 ? await parseCall([{ text: PARSE_PROMPT(raw) }]) : null;
-    let usedVision = false;
+    // ---- Step 2: parse from OCR text AND directly from the image, in parallel ----
+    // Running both at once keeps total wait close to a single pass while the
+    // vision pass still rescues handwriting and weak OCR. The better result wins.
     const illegibleCount = (raw.match(/\[illegible\]/gi) ?? []).length;
+    const [textParsed, visionParsed] = await Promise.all([
+      raw.length >= 3 ? parseCall([{ text: PARSE_PROMPT(raw) }]) : Promise.resolve(null),
+      parseCall([{ inline_data: { mime_type: mimeType, data: toBase64(data) } }, { text: VISION_PROMPT(raw) }]),
+    ]);
 
-    // ---- Step 3 (fallback): vision model reads the image directly ----
-    const weak =
-      !parsed?.success ||
-      parsed.data.medicines.length === 0 ||
+    // Prefer the text-based parse (less guessy); use vision when it is clearly better.
+    let parsed = textParsed;
+    let usedVision = false;
+    const textWeak =
+      !textParsed?.success ||
+      textParsed.data.medicines.length === 0 ||
       illegibleCount >= 3 ||
-      parsed.data.medicines.some((m) => m.confidence_or_review_status !== "confident");
-    if (weak) {
-      const vision = await parseCall([
-        { inline_data: { mime_type: mimeType, data: toBase64(data) } },
-        { text: VISION_PROMPT(raw) },
-      ]);
-      if (vision.success && (!parsed?.success || vision.data.medicines.length >= parsed.data.medicines.length)) {
-        parsed = vision;
-        usedVision = true;
-      }
+      textParsed.data.medicines.some((m) => m.confidence_or_review_status !== "confident");
+    if (
+      visionParsed.success &&
+      (!textParsed?.success ||
+        (textWeak && visionParsed.data.medicines.length >= (textParsed?.data.medicines.length ?? 0)))
+    ) {
+      parsed = visionParsed;
+      usedVision = true;
     }
 
     if (!parsed?.success) {
