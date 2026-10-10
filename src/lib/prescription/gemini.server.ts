@@ -220,7 +220,7 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
         ],
         generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: OCR_SCHEMA },
       },
-      signal: signal ?? null,
+      signal,
     );
     const ocr = z
       .object({ raw_text: z.string(), readable: z.boolean(), quality_notes: z.array(z.string()).default([]) })
@@ -239,7 +239,7 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
         contents: [{ role: "user", parts: [{ text: PARSE_PROMPT(raw) }] }],
         generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: PARSE_SCHEMA },
       },
-      signal: signal ?? null,
+      signal,
     );
     const parsed = ParseSchema.safeParse(safeJson(parsedText));
     if (!parsed.success) return fail("MALFORMED_RESPONSE", "The medicine parser returned invalid data. Please try again.", true);
