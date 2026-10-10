@@ -7,29 +7,32 @@
 | Types / contract (zod) | `src/lib/prescription/types.ts` | Portable, no runtime deps beyond `zod` |
 | Validation | `src/lib/prescription/validation.ts` | File type/size checks, shared client + server |
 | Image preprocessing | `src/lib/prescription/preprocess.ts` | Browser only: downscale, grayscale, contrast |
-| OCR + Gemini parsing | `src/lib/prescription/gemini.server.ts` | Server only. Plain `fetch` to Google Gemini REST API |
+| OCR + Gemini parsing | `src/lib/prescription/gemini.server.ts` | Server only. Plain `fetch` (streaming) to an OpenAI-compatible chat endpoint serving Gemini |
 | HTTP endpoint | `src/routes/api/public/extract-prescription.ts` | Thin wrapper; reads `GEMINI_API_KEY` |
 | API client | `src/lib/prescription/client.ts` | `extractPrescription(file)` |
 | State hook | `src/hooks/use-prescription-extractor.ts` | UI-agnostic state machine |
 | UI | `src/routes/index.tsx`, `src/components/prescription/*` | Presentation only |
 
-Pipeline: validate → preprocess (images) → **Gemini OCR pass** (verbatim transcription, `[illegible]` markers) → **Gemini parse pass** over the text only (strict `responseSchema`) → zod validation → normalization (recomputes `missing_fields`, flags names not found in the text) → response.
+Pipeline: validate → preprocess (EXIF rotation, upscale small images, grayscale, contrast, sharpen) → **Gemini OCR pass** (verbatim transcription, `[illegible]` markers) → **Gemini parse pass** over the text only (strict `responseSchema`) → **vision fallback** (if text is weak/handwritten, Gemini reads the image directly; unreadable names become "Name unclear") → zod validation → normalization (recomputes `missing_fields`, flags names not found in the text) → response.
 
-Model: `gemini-2.5-flash` (change `GEMINI_MODEL` in `gemini.server.ts`).
+Model: `google/gemini-3.5-flash` via Lovable AI Gateway (change `GEMINI_MODEL` / `DEFAULT_GATEWAY_URL` in `gemini.server.ts`). Partial results are returned whenever any medicine is readable; empty fields display as "Not clearly mentioned".
 
 ## Environment variables
 
 | Name | Where | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | server only | Google AI Studio key — https://aistudio.google.com/app/apikey |
+| `LOVABLE_API_KEY` | server only | Provided automatically in Lovable. |
 
-Never prefix it with `VITE_`; it must never reach the browser.
+Never prefix keys with `VITE_`; they must never reach the browser.
+
+**Moving to EVERCARE without Lovable:** replace the body of `callGemini()` with a call to Google's API
+(`POST https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, `Authorization: Bearer $GEMINI_API_KEY`, model `gemini-2.5-flash`) — it accepts the same OpenAI-compatible request, so only the URL, key and model id change. Pass that key in the route instead of `LOVABLE_API_KEY`.
 
 ## Local install & run
 
 ```bash
 bun install            # or npm install
-export GEMINI_API_KEY=your_key   # or put in .env (do not commit)
+export LOVABLE_API_KEY=your_key   # or GEMINI_API_KEY after the swap above   # or put in .env (do not commit)
 bun run dev            # http://localhost:8080
 ```
 
@@ -86,7 +89,7 @@ curl -F "file=@rx.jpg" http://localhost:8080/api/public/extract-prescription
    - **Express/Node 18+**:
      ```ts
      app.post("/api/extract-prescription", upload.single("file"), async (req, res) => {
-       const r = await extractPrescriptionFromBytes({ data: req.file.buffer.buffer.slice(req.file.buffer.byteOffset, req.file.buffer.byteOffset + req.file.buffer.byteLength), mimeType: req.file.mimetype, apiKey: process.env.GEMINI_API_KEY! });
+       const r = await extractPrescriptionFromBytes({ data: req.file.buffer.buffer.slice(req.file.buffer.byteOffset, req.file.buffer.byteOffset + req.file.buffer.byteLength), mimeType: req.file.mimetype, apiKey: process.env.GEMINI_API_KEY! /* see swap note */ });
        res.status(r.success ? 200 : 422).json(r);
      });
      ```
