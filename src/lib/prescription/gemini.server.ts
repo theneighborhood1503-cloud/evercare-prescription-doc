@@ -1,5 +1,6 @@
 /**
- * Server-only Gemini pipeline. Portable: uses only `fetch` + `zod`.
+ * Server-only Gemini pipeline (via Lovable AI Gateway). Portable: uses only `fetch` + `zod`.
+ * To use Google directly later, swap callGemini() for a generativelanguage.googleapis.com call.
  * Step 1 (OCR): transcribe ALL readable text from the image/PDF verbatim.
  * Step 2 (Parse): extract medicines ONLY from the step-1 text, with strict JSON schema.
  * Never logs prescription content.
@@ -15,8 +16,9 @@ import {
 import { fail } from "./validation";
 import { z } from "zod";
 
-export const GEMINI_MODEL = "gemini-2.5-flash";
-const API = "https://generativelanguage.googleapis.com/v1beta/models";
+/** Gemini model served through the Lovable AI Gateway (OpenAI-compatible chat completions). */
+export const GEMINI_MODEL = "google/gemini-3.5-flash";
+export const DEFAULT_GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
 class GeminiError extends Error {
   constructor(public status: number, message: string) {
@@ -24,34 +26,98 @@ class GeminiError extends Error {
   }
 }
 
-async function callGemini(apiKey: string, body: unknown, signal?: AbortSignal): Promise<string> {
+type GPart = { text: string } | { inline_data: { mime_type: string; data: string } };
+type GSchema = { type: string; nullable?: boolean; properties?: Record<string, GSchema>; items?: GSchema; required?: string[]; enum?: string[] };
+
+/** Convert the Gemini-style schema to strict JSON Schema. */
+function toJsonSchema(g: GSchema): Record<string, unknown> {
+  const t = g.type.toLowerCase();
+  const out: Record<string, unknown> = { type: g.nullable ? [t, "null"] : t };
+  if (g.enum) out["enum"] = g.enum;
+  if (g.items) out["items"] = toJsonSchema(g.items);
+  if (g.properties) {
+    out["properties"] = Object.fromEntries(Object.entries(g.properties).map(([k, v]) => [k, toJsonSchema(v)]));
+    out["required"] = g.required ?? Object.keys(g.properties);
+    out["additionalProperties"] = false;
+  }
+  return out;
+}
+
+function toChatPart(p: GPart) {
+  if ("text" in p) return { type: "text", text: p.text };
+  const { mime_type, data } = p.inline_data;
+  if (mime_type === "application/pdf") {
+    return { type: "file", file: { filename: "prescription.pdf", file_data: `data:application/pdf;base64,${data}` } };
+  }
+  return { type: "image_url", image_url: { url: `data:${mime_type};base64,${data}` } };
+}
+
+/** Streams a chat completion and returns the accumulated text. */
+async function callGemini(
+  apiKey: string,
+  body: { contents: { parts: GPart[] }[]; generationConfig: { responseSchema: GSchema; [k: string]: unknown } },
+  signal?: AbortSignal,
+  gatewayUrl = DEFAULT_GATEWAY_URL,
+): Promise<string> {
   let res: Response;
   try {
-    res = await fetch(`${API}/${GEMINI_MODEL}:generateContent`, {
+    res = await fetch(gatewayUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify(body),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "X-Lovable-AIG-SDK": "fetch",
+      },
+      body: JSON.stringify({
+        model: GEMINI_MODEL,
+        stream: true,
+        temperature: 0,
+        messages: [{ role: "user", content: body.contents.flatMap((c) => c.parts.map(toChatPart)) }],
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "result", strict: true, schema: toJsonSchema(body.generationConfig.responseSchema) },
+        },
+      }),
       signal: signal ?? null,
     });
   } catch {
     throw new GeminiError(0, "network");
   }
-  if (!res.ok) {
-    let msg = `Gemini API error (${res.status})`;
+  if (!res.ok || !res.body) {
+    let msg = `AI error (${res.status})`;
     try {
-      const j = (await res.json()) as { error?: { message?: string } };
-      if (j.error?.message) msg = j.error.message;
+      const j = (await res.json()) as { error?: { message?: string }; message?: string };
+      msg = j.error?.message ?? j.message ?? msg;
     } catch {
       /* ignore */
     }
     throw new GeminiError(res.status, msg);
   }
-  const json = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
-    promptFeedback?: { blockReason?: string };
-  };
-  if (json.promptFeedback?.blockReason) throw new GeminiError(422, "The request was blocked by the model.");
-  const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      try {
+        const j = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[]; error?: { message?: string; code?: number } };
+        if (j.error) throw new GeminiError(j.error.code ?? 502, j.error.message ?? "stream error");
+        text += j.choices?.[0]?.delta?.content ?? "";
+      } catch (e) {
+        if (e instanceof GeminiError) throw e;
+      }
+    }
+  }
   return text;
 }
 
@@ -76,7 +142,7 @@ Rules:
 Return JSON: {"raw_text": string, "readable": boolean, "quality_notes": string[]}.
 Set readable=false only if the image contains no readable text at all.`;
 
-const OCR_SCHEMA = {
+const OCR_SCHEMA: GSchema = {
   type: "OBJECT",
   properties: {
     raw_text: { type: "STRING" },
@@ -86,8 +152,8 @@ const OCR_SCHEMA = {
   required: ["raw_text", "readable", "quality_notes"],
 };
 
-const nStr = { type: "STRING", nullable: true };
-const PARSE_SCHEMA = {
+const nStr: GSchema = { type: "STRING", nullable: true };
+const PARSE_SCHEMA: GSchema = {
   type: "OBJECT",
   properties: {
     prescription: {
@@ -225,7 +291,7 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
       apiKey,
       {
         contents: [
-          { role: "user", parts: [{ inline_data: { mime_type: mimeType, data: toBase64(data) } }, { text: OCR_PROMPT }] },
+          { parts: [{ inline_data: { mime_type: mimeType, data: toBase64(data) } }, { text: OCR_PROMPT }] },
         ],
         generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: OCR_SCHEMA },
       },
@@ -243,7 +309,7 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
           await callGemini(
             apiKey,
             {
-              contents: [{ role: "user", parts }],
+              contents: [{ parts: parts as GPart[] }],
               generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: PARSE_SCHEMA },
             },
             signal,
@@ -297,7 +363,9 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
     if (e instanceof GeminiError) {
       if (e.status === 0) return fail("NETWORK_ERROR", "Could not reach the Gemini service. Check your connection and retry.", true);
       if (e.status === 429) return fail("RATE_LIMITED", "Too many requests right now. Please wait a moment and retry.", true);
-      if (e.status === 401 || e.status === 403) return fail("CONFIG_ERROR", "The Gemini API key is invalid or lacks permission.");
+      if (e.status === 402) return fail("API_ERROR", "AI credits have run out. Add credits in workspace settings, then retry.");
+      if (e.status === 401) return fail("CONFIG_ERROR", "The AI service key is missing or invalid.");
+      if (e.status === 403) return fail("API_ERROR", "The AI service declined this request.");
       if (e.status === 400) return fail("API_ERROR", "The file could not be processed by Gemini. Try a different image or PDF.");
       if (e.status >= 500) return fail("API_ERROR", "Gemini is temporarily unavailable. Please retry shortly.", true);
       return fail("API_ERROR", "Gemini could not process this prescription.", true);

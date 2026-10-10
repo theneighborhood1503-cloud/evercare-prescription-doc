@@ -24,8 +24,8 @@ export const Route = createFileRoute("/api/public/extract-prescription")({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const apiKey = process.env["GEMINI_API_KEY"];
-        if (!apiKey) return json(fail("CONFIG_ERROR", "Server is missing GEMINI_API_KEY."), 500);
+        const apiKey = process.env["LOVABLE_API_KEY"];
+        if (!apiKey) return json(fail("CONFIG_ERROR", "The AI service is not configured on the server."), 500);
 
         let form: FormData;
         try {
