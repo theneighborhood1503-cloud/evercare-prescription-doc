@@ -33,12 +33,12 @@ type GSchema = { type: string; nullable?: boolean; properties?: Record<string, G
 function toJsonSchema(g: GSchema): Record<string, unknown> {
   const t = g.type.toLowerCase();
   const out: Record<string, unknown> = { type: g.nullable ? [t, "null"] : t };
-  if (g.enum) out.enum = g.enum;
-  if (g.items) out.items = toJsonSchema(g.items);
+  if (g.enum) out["enum"] = g.enum;
+  if (g.items) out["items"] = toJsonSchema(g.items);
   if (g.properties) {
-    out.properties = Object.fromEntries(Object.entries(g.properties).map(([k, v]) => [k, toJsonSchema(v)]));
-    out.required = g.required ?? Object.keys(g.properties);
-    out.additionalProperties = false;
+    out["properties"] = Object.fromEntries(Object.entries(g.properties).map(([k, v]) => [k, toJsonSchema(v)]));
+    out["required"] = g.required ?? Object.keys(g.properties);
+    out["additionalProperties"] = false;
   }
   return out;
 }
@@ -55,7 +55,7 @@ function toChatPart(p: GPart) {
 /** Streams a chat completion and returns the accumulated text. */
 async function callGemini(
   apiKey: string,
-  body: { contents: { parts: GPart[] }[]; generationConfig: { responseSchema: GSchema } },
+  body: { contents: { parts: GPart[] }[]; generationConfig: { responseSchema: GSchema; [k: string]: unknown } },
   signal?: AbortSignal,
   gatewayUrl = DEFAULT_GATEWAY_URL,
 ): Promise<string> {
