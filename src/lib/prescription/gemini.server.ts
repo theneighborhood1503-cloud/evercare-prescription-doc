@@ -71,8 +71,10 @@ Rules:
 - Do NOT correct, expand, translate, or interpret anything.
 - Do NOT guess illegible words. Write [illegible] for any word you cannot read with confidence.
 - Include headers, addresses, doctor details, dates, notes, everything.
+- The page may be rotated, skewed or photographed at an angle; read it in its natural orientation.
+- Partial transcription is fine: transcribe whatever is readable even if most of the page is unclear.
 Return JSON: {"raw_text": string, "readable": boolean, "quality_notes": string[]}.
-Set readable=false if the image is not a prescription/document or no text can be read.`;
+Set readable=false only if the image contains no readable text at all.`;
 
 const OCR_SCHEMA = {
   type: "OBJECT",
@@ -158,6 +160,13 @@ OCR TEXT:
 ${raw}
 """`;
 
+const VISION_PROMPT = (raw: string) => `${PARSE_PROMPT(raw || "(OCR returned little or no text)")}
+
+ADDITIONAL CONTEXT: The OCR text above may be incomplete (e.g. handwriting). The original prescription image is attached.
+Look at the image directly to read medicine lines the OCR missed. The same rules apply: never guess.
+- If a medicine line clearly exists but its name is unreadable, use medicine_name "Name unclear", status "needs_review", and fill only the parts you can actually read.
+- source_text: copy what you can read from that line in the image, marking unreadable words as [illegible].`;
+
 const ParseSchema = z.object({
   prescription: PrescriptionDetailsSchema,
   medicines: z.array(MedicineSchema),
@@ -181,7 +190,7 @@ function safeJson(text: string): unknown {
 }
 
 /** Ensure missing_fields reflects actual nulls and flag medicines whose source isn't in the OCR text. */
-function normalizeMedicine(m: Medicine, raw: string, warnings: string[]): Medicine {
+function normalizeMedicine(m: Medicine, raw: string, warnings: string[], fromImage = false): Medicine {
   const missing = new Set(m.missing_fields.filter((f) => (MEDICINE_FIELDS as readonly string[]).includes(f)));
   for (const f of MEDICINE_FIELDS) {
     const v = m[f as keyof Medicine];
@@ -191,9 +200,9 @@ function normalizeMedicine(m: Medicine, raw: string, warnings: string[]): Medici
   let status = m.confidence_or_review_status;
   const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
   const firstWord = norm(m.medicine_name).split(" ")[0] ?? "";
-  if (firstWord && !norm(raw).includes(firstWord)) {
+  if (firstWord && firstWord !== "name" && !norm(raw).includes(firstWord)) {
     status = "needs_review";
-    warnings.push(`"${m.medicine_name}" could not be matched exactly in the extracted text — please verify.`);
+    if (!fromImage) warnings.push(`"${m.medicine_name}" could not be matched exactly in the extracted text — please verify.`);
   }
   if (/\[illegible\]/i.test(m.source_text) && status === "confident") status = "needs_review";
   return { ...m, missing_fields: [...missing], confidence_or_review_status: status };
@@ -225,31 +234,62 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
     const ocr = z
       .object({ raw_text: z.string(), readable: z.boolean(), quality_notes: z.array(z.string()).default([]) })
       .safeParse(safeJson(ocrText));
-    if (!ocr.success) return fail("MALFORMED_RESPONSE", "The text reader returned an unexpected response. Please try again.", true);
+    const raw = ocr.success ? ocr.data.raw_text.trim() : "";
+    const qualityNotes = ocr.success ? ocr.data.quality_notes : ["Text transcription was incomplete; medicines were read directly from the image."];
 
-    const raw = ocr.data.raw_text.trim();
-    if (!ocr.data.readable || raw.length < 3) {
-      return fail("UNREADABLE", "No readable prescription text was found. Try a clearer, well-lit photo with the full prescription in frame.");
+    const parseCall = async (parts: unknown[]) =>
+      ParseSchema.safeParse(
+        safeJson(
+          await callGemini(
+            apiKey,
+            {
+              contents: [{ role: "user", parts }],
+              generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: PARSE_SCHEMA },
+            },
+            signal,
+          ),
+        ),
+      );
+
+    // ---- Step 2: Parse medicines from OCR text only ----
+    let parsed = raw.length >= 3 ? await parseCall([{ text: PARSE_PROMPT(raw) }]) : null;
+    let usedVision = false;
+    const illegibleCount = (raw.match(/\[illegible\]/gi) ?? []).length;
+
+    // ---- Step 3 (fallback): vision model reads the image directly ----
+    const weak =
+      !parsed?.success ||
+      parsed.data.medicines.length === 0 ||
+      illegibleCount >= 3 ||
+      parsed.data.medicines.some((m) => m.confidence_or_review_status !== "confident");
+    if (weak) {
+      const vision = await parseCall([
+        { inline_data: { mime_type: mimeType, data: toBase64(data) } },
+        { text: VISION_PROMPT(raw) },
+      ]);
+      if (vision.success && (!parsed?.success || vision.data.medicines.length >= parsed.data.medicines.length)) {
+        parsed = vision;
+        usedVision = true;
+      }
     }
 
-    // ---- Step 2: Parse medicines from text only ----
-    const parsedText = await callGemini(
-      apiKey,
-      {
-        contents: [{ role: "user", parts: [{ text: PARSE_PROMPT(raw) }] }],
-        generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: PARSE_SCHEMA },
-      },
-      signal,
-    );
-    const parsed = ParseSchema.safeParse(safeJson(parsedText));
-    if (!parsed.success) return fail("MALFORMED_RESPONSE", "The medicine parser returned invalid data. Please try again.", true);
+    if (!parsed?.success) {
+      if (raw.length < 3) {
+        return fail("UNREADABLE", "Very little text could be read. Please upload a clearer, well-lit image, or crop it to just the prescription.");
+      }
+      return fail("MALFORMED_RESPONSE", "The medicine parser returned invalid data. Please try again.", true);
+    }
 
-    const warnings = [...ocr.data.quality_notes, ...parsed.data.warnings];
+    const warnings = [...qualityNotes, ...parsed.data.warnings];
+    if (usedVision) warnings.push("Some details were read directly from the image because the text was unclear — please verify carefully.");
+    if (raw.length < 3 && parsed.data.medicines.length === 0) {
+      return fail("UNREADABLE", "No readable text or medicines were found. Please upload a clearer image, or crop it to just the prescription.");
+    }
     if (/\[illegible\]/i.test(raw)) warnings.push("Some words were illegible and marked [illegible].");
-    const medicines = parsed.data.medicines.map((m) => normalizeMedicine(m, raw, warnings));
+    const medicines = parsed.data.medicines.map((m) => normalizeMedicine(m, raw, warnings, usedVision));
     if (medicines.length === 0) warnings.push("No medicines were detected in the readable text.");
 
-    const result = { success: true as const, raw_text: raw, prescription: parsed.data.prescription, medicines, warnings };
+    const result = { success: true as const, raw_text: raw || "(No text could be transcribed — medicines were read directly from the image.)", prescription: parsed.data.prescription, medicines, warnings };
     const check = ExtractionSuccessSchema.safeParse(result);
     if (!check.success) return fail("MALFORMED_RESPONSE", "Extraction output failed validation.", true);
     return check.data;

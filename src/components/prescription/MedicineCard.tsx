@@ -13,7 +13,7 @@ function Field({ label, value }: { label: string; value: string | null | string[
     <div>
       <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</dt>
       <dd className={empty ? "text-sm italic text-muted-foreground" : "text-sm text-foreground"}>
-        {empty ? "Unknown" : Array.isArray(value) ? value.join(", ") : value}
+        {empty ? "Not clearly mentioned" : Array.isArray(value) ? value.join(", ") : value}
       </dd>
     </div>
   );
@@ -38,7 +38,7 @@ export function MedicineCard({ m, index }: { m: Medicine; index: number }) {
         <Field label="Per dose" value={m.quantity_per_dose} />
         <Field label="Route" value={m.route_of_administration} />
         <Field label="Frequency" value={m.frequency} />
-        <Field label="Times" value={m.prescribed_times} />
+        <Field label="Timing" value={m.prescribed_times} />
         <Field label="Duration" value={m.duration} />
         <Field label="Total qty" value={m.total_quantity} />
         <div className="col-span-2 sm:col-span-3">
