@@ -31,7 +31,7 @@ async function callGemini(apiKey: string, body: unknown, signal?: AbortSignal): 
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify(body),
-      signal,
+      signal: signal ?? null,
     });
   } catch {
     throw new GeminiError(0, "network");
@@ -220,7 +220,7 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
         ],
         generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: OCR_SCHEMA },
       },
-      signal,
+      signal: signal ?? null,
     );
     const ocr = z
       .object({ raw_text: z.string(), readable: z.boolean(), quality_notes: z.array(z.string()).default([]) })
@@ -239,7 +239,7 @@ export async function extractPrescriptionFromBytes({ data, mimeType, apiKey, sig
         contents: [{ role: "user", parts: [{ text: PARSE_PROMPT(raw) }] }],
         generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: PARSE_SCHEMA },
       },
-      signal,
+      signal: signal ?? null,
     );
     const parsed = ParseSchema.safeParse(safeJson(parsedText));
     if (!parsed.success) return fail("MALFORMED_RESPONSE", "The medicine parser returned invalid data. Please try again.", true);

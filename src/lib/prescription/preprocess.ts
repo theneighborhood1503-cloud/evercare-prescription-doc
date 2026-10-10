@@ -26,7 +26,7 @@ export async function preprocessImage(file: File): Promise<File> {
     let min = 255;
     let max = 0;
     for (let i = 0; i < d.length; i += 4) {
-      const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      const g = 0.299 * d[i]! + 0.587 * d[i + 1]! + 0.114 * d[i + 2]!;
       d[i] = d[i + 1] = d[i + 2] = g;
       if (g < min) min = g;
       if (g > max) max = g;
@@ -34,7 +34,7 @@ export async function preprocessImage(file: File): Promise<File> {
     const range = Math.max(1, max - min);
     if (range < 200) {
       for (let i = 0; i < d.length; i += 4) {
-        const v = ((d[i] - min) / range) * 255;
+        const v = ((d[i]! - min) / range) * 255;
         d[i] = d[i + 1] = d[i + 2] = v;
       }
     }

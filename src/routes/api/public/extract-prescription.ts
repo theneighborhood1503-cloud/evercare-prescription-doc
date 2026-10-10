@@ -24,7 +24,7 @@ export const Route = createFileRoute("/api/public/extract-prescription")({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const apiKey = process.env.GEMINI_API_KEY;
+        const apiKey = process.env["GEMINI_API_KEY"];
         if (!apiKey) return json(fail("CONFIG_ERROR", "Server is missing GEMINI_API_KEY."), 500);
 
         let form: FormData;
@@ -37,7 +37,7 @@ export const Route = createFileRoute("/api/public/extract-prescription")({
         if (!(file instanceof File)) return json(fail("INVALID_FILE", "No file was uploaded."), 400);
 
         const invalid = validateFile(file);
-        if (invalid) return json(invalid, STATUS[invalid.error.code]);
+        if (invalid) return json(invalid, STATUS[invalid.error.code] ?? 400);
 
         const result = await extractPrescriptionFromBytes({
           data: await file.arrayBuffer(),

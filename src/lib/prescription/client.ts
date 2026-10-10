@@ -22,7 +22,7 @@ export async function extractPrescription(file: File, opts: ExtractOptions = {})
 
   let res: Response;
   try {
-    res = await fetch(opts.endpoint ?? "/api/public/extract-prescription", { method: "POST", body, signal: opts.signal });
+    res = await fetch(opts.endpoint ?? "/api/public/extract-prescription", { method: "POST", body, signal: opts.signal ?? null });
   } catch {
     return fail("NETWORK_ERROR", "Network error — could not reach the extraction server.", true);
   }
